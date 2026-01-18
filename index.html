@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shnayim Mikra</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            background-color: #fff;
+            font-family: "SBL Hebrew", "Ezra SIL", "Times New Roman", serif;
+            color: #1a1a1a;
+            line-height: 1.65;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        #app-container {
+            box-sizing: border-box;
+            margin: 0 auto;
+            max-width: 650px;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* --- Top Navigation --- */
+        #nav {
+            padding: 8px 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background-color: #fff;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            border-bottom: 1px solid #eee;
+        }
+
+        #aliyah-title {
+            font-size: 19px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        button {
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            cursor: pointer;
+            padding: 4px 12px;
+            font-size: 16px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        button:hover:not(:disabled) { background: #eee; }
+        button:disabled { opacity: 0.3; cursor: default; }
+
+        .icon { width: 20px; height: 20px; fill: #555; }
+
+        .font-controls { display: flex; gap: 4px; }
+        .font-controls button { font-weight: bold; font-family: monospace; padding: 2px 10px; }
+
+        /* --- Content Area --- */
+        #main-div {
+            padding: 15px 20px;
+            text-align: justify;
+            contain: content; /* Performance optimization */
+        }
+
+        .perekTitle {
+            font-weight: bold;
+            font-size: 0.8em;
+            text-align: center;
+            color: #888;
+            margin: 25px 0 15px 0;
+            display: block;
+            width: 100%;
+        }
+
+        .verse-sequence {
+            display: inline;
+        }
+
+        .hebrew-text { 
+            color: #000; 
+            margin: 0 2px;
+        }
+        
+        .targum-text { 
+            color: #004e5f; 
+            font-size: 0.94em; 
+            margin: 0 4px;
+        }
+
+        .parsha-break {
+            font-weight: bold;
+            font-size: 1em; 
+            color: #000;
+            display: inline-block;
+        }
+
+        .petuhah-marker {
+            display: block;
+            margin-bottom: 0.5em;
+            margin-top: 0.2em;
+        }
+
+        .setumah-marker {
+            margin: 0 2em;
+        }
+
+        .possuk-number {
+            font-size: 0.65em;
+            padding: 1px 5px;
+            margin: 0 4px 0 6px;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+            color: #999;
+            cursor: pointer;
+            user-select: none;
+            display: inline-block;
+            font-family: sans-serif;
+            background: #fff;
+            line-height: 1.2;
+            vertical-align: middle;
+        }
+
+        .bookmark-active {
+            background-color: #fff9c4;
+            border-color: #fbc02d;
+            color: #000;
+            font-weight: bold;
+        }
+
+        /* --- Footer --- */
+        #footer-nav {
+            padding: 30px 20px 60px;
+            text-align: center;
+        }
+
+        .footer-next-btn {
+            background-color: #1a1a1a;
+            color: white;
+            border: none;
+            padding: 12px 40px;
+            font-size: 18px;
+            border-radius: 8px;
+            width: 100%;
+            cursor: pointer;
+        }
+
+        .hidden { display: none; }
+        .error { color: red; text-align: center; padding: 20px; }
+    </style>
+</head>
+<body>
+
+<div id="app-container">
+    <div id="nav">
+        <div class="font-controls">
+            <button onclick="adjustFont(2)">A+</button>
+            <button onclick="adjustFont(-2)">A-</button>
+        </div>
+
+        <div id="aliyah-title"></div>
+
+        <div id="navigation-arrows">
+            <button id="btn-prev" onclick="changeAliyah(-1)" title="Prev">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M8.59 16.59L10 18l6-6-6-6-1.41 1.41L13.17 12z"/></svg>
+            </button>
+            <button id="btn-next" onclick="changeAliyah(1)" title="Next">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+            </button>
+        </div>
+    </div>
+
+    <div id="main-div">
+        <div id="content-error" class="error hidden"></div>
+        <div id="verses-container"></div>
+    </div>
+
+    <div id="footer-nav" class="hidden">
+        <button id="footer-next-btn" class="footer-next-btn" onclick="handleFooterClick()">הבא</button>
+    </div>
+</div>
+
+<script>
+    const API_BASE = "https://www.sefaria.org/api";
+    const HEB_NUMBERS = ["א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט", "י", "יא", "יב", "יג", "יד", "טו", "טז", "יז", "יח", "יט", "כ", "כא", "כב", "כג", "כד", "כה", "כו", "כז", "כח", "כט", "ל", "לא", "לב", "לג", "לד", "לה", "לו", "לז", "לח", "לט", "מ", "מא", "מב", "מג", "מד", "מה", "מו", "מז", "מח", "מט", "נ", "נא", "נב", "נג", "נד", "נה", "נו", "נז", "נח", "נט", "ס", "סא", "סב", "סג", "סד", "סה", "סu", "סז", "סח", "סט", "ע", "עא", "עב", "עג", "עד", "עה", "עו", "עז", "עח", "עט", "פ", "פא", "פב", "פג", "פד", "פה", "פו", "פז", "פח", "פט", "צ", "צא", "צב", "צג", "צד", "צה", "צו", "צז", "צח", "צט", "ק"];
+    const ALIYAH_NAMES = ["ראשון", "שני", "שלישי", "רביעי", "חמישי", "שישי", "שביעי"];
+    const STORAGE_KEY = 'shnayim_bookmark_v2';
+
+    const state = {
+        parshaTitle: "",
+        aliyotRefs: [], 
+        currentAliyahIndex: 0,
+        cache: {}, 
+        fontSize: 24,
+        bookmarkId: localStorage.getItem(STORAGE_KEY)
+    };
+
+    document.addEventListener('DOMContentLoaded', async () => {
+        document.getElementById('main-div').style.fontSize = state.fontSize + "px";
+        const today = new Date();
+        await loadCalendar(today.toISOString().split('T')[0]);
+        
+        // Event Delegation for bookmarking to improve performance
+        document.getElementById('verses-container').addEventListener('click', (e) => {
+            if (e.target.classList.contains('possuk-number')) {
+                const id = e.target.getAttribute('data-id');
+                if (state.bookmarkId === id) {
+                    state.bookmarkId = null;
+                    localStorage.removeItem(STORAGE_KEY);
+                } else {
+                    state.bookmarkId = id;
+                    localStorage.setItem(STORAGE_KEY, id);
+                }
+                
+                // Update UI without full re-render
+                const container = document.getElementById('verses-container');
+                container.querySelectorAll('.possuk-number').forEach(btn => {
+                    btn.classList.toggle('bookmark-active', btn.getAttribute('data-id') === state.bookmarkId);
+                });
+            }
+        });
+    });
+
+    async function loadCalendar(dateStr) {
+        try {
+            const res = await fetch(`${API_BASE}/calendars?diaspora=0&year=${dateStr.split('-')[0]}&month=${dateStr.split('-')[1]}&day=${dateStr.split('-')[2]}`);
+            const data = await res.json();
+            const parshaItem = data.calendar_items.find(item => item.title.en === "Parashat Hashavua");
+            if (!parshaItem) return;
+
+            state.parshaTitle = parshaItem.displayValue.he;
+            state.aliyotRefs = parshaItem.extraDetails.aliyot.slice(0, 7);
+            loadAliyah(0);
+        } catch (err) { console.error(err); }
+    }
+
+    async function loadAliyah(index) {
+        state.currentAliyahIndex = index;
+        const ref = state.aliyotRefs[index];
+        updateUI();
+
+        if (state.cache[ref]) {
+            renderAliyah(state.cache[ref]);
+            prefetch(index + 1);
+            return;
+        }
+
+        try {
+            const [cRes, oRes] = await Promise.all([
+                fetch(`${API_BASE}/v3/texts/${encodeURIComponent(ref)}?return_format=strip_only_footnotes`),
+                fetch(`${API_BASE}/v3/texts/${encodeURIComponent('Onkelos ' + ref)}?return_format=text_only`)
+            ]);
+            state.cache[ref] = processData(await cRes.json(), await oRes.json());
+            renderAliyah(state.cache[ref]);
+            prefetch(index + 1);
+        } catch (err) { console.error(err); }
+    }
+
+    async function prefetch(index) {
+        if (index >= state.aliyotRefs.length) return;
+        const ref = state.aliyotRefs[index];
+        if (state.cache[ref]) return;
+        try {
+            const [cRes, oRes] = await Promise.all([
+                fetch(`${API_BASE}/v3/texts/${encodeURIComponent(ref)}?return_format=strip_only_footnotes`),
+                fetch(`${API_BASE}/v3/texts/${encodeURIComponent('Onkelos ' + ref)}?return_format=text_only`)
+            ]);
+            state.cache[ref] = processData(await cRes.json(), await oRes.json());
+        } catch (e) {}
+    }
+
+    function cleanSefariaHtml(html) {
+        if (!html) return "";
+        // Minimal cleaning to preserve taamim/nekudot but remove block markers
+        return html
+            .replace(/&nbsp;/g, ' ')
+            .replace(/<br\s*\/?>/gi, ' ')
+            .replace(/\{פ\}/g, '')
+            .replace(/\{ס\}/g, '')
+            .trim();
+    }
+
+    function processData(cJson, oJson) {
+        const getH = (j) => {
+            if(!j || !j.versions) return [];
+            let v = j.versions.find(v => v.language === 'he' && v.isPrimary) || j.versions.find(v => v.language === 'he');
+            return v ? v.text : [];
+        };
+        const cT = getH(cJson);
+        const oT = getH(oJson);
+        let res = [];
+        let isMulti = Array.isArray(cT[0]);
+        
+        if (isMulti) {
+            let sP = parseInt(cJson.sections[0]); 
+            cT.forEach((chap, cIdx) => {
+                chap.forEach((vT, vIdx) => {
+                    let oV = ""; try { oV = oT[cIdx][vIdx]; } catch(e){}
+                    let vN = (cIdx === 0) ? (parseInt(cJson.sections[1]) + vIdx) : (1 + vIdx);
+                    res.push({ p: sP + cIdx, n: vN, h: vT, o: oV, newP: (vIdx === 0 && (cIdx > 0 || vN === 1)) });
+                });
+            });
+        } else {
+            let sP = parseInt(cJson.sections[0]);
+            let sV = parseInt(cJson.sections[1]);
+            cT.forEach((vT, vIdx) => {
+                let oV = ""; try { oV = oT[vIdx]; } catch(e){}
+                res.push({ p: sP, n: sV + vIdx, h: vT, o: oV, newP: (vIdx === 0 && sV === 1) });
+            });
+        }
+        return res;
+    }
+
+    function renderAliyah(data) {
+        const container = document.getElementById('verses-container');
+        let htmlChunks = [];
+        
+        for(let i = 0; i < data.length; i++) {
+            const row = data[i];
+            if (row.newP) {
+                htmlChunks.push(`<div class="perekTitle">פרק ${getHNum(row.p)}</div>`);
+            }
+            
+            const id = `${state.parshaTitle}-${row.p}-${row.n}`;
+            const bCls = state.bookmarkId === id ? 'bookmark-active' : '';
+            
+            const hasPetuchah = (row.h || "").includes("{פ}");
+            const hasSetumah = (row.h || "").includes("{ס}");
+            const isLastVerse = (i === data.length - 1);
+            
+            const displayH = cleanSefariaHtml(row.h);
+            const displayO = cleanSefariaHtml(row.o);
+
+            htmlChunks.push(`<span class="verse-sequence">` +
+                `<span class="possuk-number ${bCls}" data-id="${id}">${getHNum(row.n)}</span>` +
+                `<span class="hebrew-text">${displayH}</span>` +
+                `<span class="hebrew-text">${displayH}</span>` +
+                `<span class="targum-text">${displayO}</span>` +
+                (hasPetuchah ? `<span class="parsha-break ${isLastVerse ? '' : 'petuhah-marker'}">פ</span>` : "") +
+                (hasSetumah ? `<span class="parsha-break setumah-marker">ס</span>` : "") +
+                ` ` +
+            `</span>`);
+        }
+        
+        container.innerHTML = htmlChunks.join('');
+        window.scrollTo(0, 0);
+    }
+
+    function getHNum(n) { return (n > 0 && n <= HEB_NUMBERS.length) ? HEB_NUMBERS[n - 1] : n; }
+
+    function updateUI() {
+        const idx = state.currentAliyahIndex;
+        const footerBtn = document.getElementById('footer-next-btn');
+        
+        document.getElementById('aliyah-title').innerText = ALIYAH_NAMES[idx];
+        document.getElementById('btn-next').disabled = (idx >= state.aliyotRefs.length - 1);
+        document.getElementById('btn-prev').disabled = (idx === 0);
+        
+        if (idx === state.aliyotRefs.length - 1) {
+            footerBtn.innerText = "חזור להתחלה (ראשון)";
+        } else {
+            footerBtn.innerText = "הבא";
+        }
+        
+        document.getElementById('footer-nav').classList.remove('hidden');
+    }
+
+    window.handleFooterClick = () => {
+        if (state.currentAliyahIndex === state.aliyotRefs.length - 1) {
+            loadAliyah(0);
+        } else {
+            changeAliyah(1);
+        }
+    };
+
+    window.changeAliyah = (dir) => {
+        const next = state.currentAliyahIndex + dir;
+        if (next >= 0 && next < state.aliyotRefs.length) loadAliyah(next);
+    };
+
+    window.adjustFont = (d) => {
+        state.fontSize = Math.max(16, Math.min(45, state.fontSize + d));
+        document.getElementById('main-div').style.fontSize = state.fontSize + "px";
+    };
+</script>
+</body>
+</html>
