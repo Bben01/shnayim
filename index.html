@@ -36,8 +36,8 @@
         /* --- Original Nav Buttons --- */
         #nav {
             padding: 8px 15px;
-            display: flex;
-            justify-content: space-between;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
             align-items: center;
             background-color: #fff;
             position: sticky;
@@ -50,6 +50,22 @@
             font-size: 19px;
             font-weight: bold;
             color: #333;
+        }
+
+        #parsha-progress {
+            min-height: 1.3em;
+            font-family: sans-serif;
+            font-size: 12px;
+            color: #666;
+            text-align: center;
+        }
+
+        .font-controls {
+            justify-self: start;
+        }
+
+        #navigation-arrows {
+            justify-self: end;
         }
 
         button {
@@ -208,7 +224,10 @@
                 <button onclick="adjustFont(-2)">A-</button>
             </div>
 
-            <div id="aliyah-title"></div>
+            <div>
+                <div id="aliyah-title"></div>
+                <div id="parsha-progress" aria-live="polite"></div>
+            </div>
 
             <div id="navigation-arrows">
                 <button id="btn-prev" onclick="changeAliyah(-1, event)">
@@ -240,21 +259,32 @@
         const STORAGE_KEY = 'shnayim_bookmark_v2';
         const STATE_KEY = 'shnayim_state_v1';
         const CACHE_PREFIX = 'shnayim_cache_';
+        const WEEKLY_BOUNDARY_VERSION = 2;
 
         const state = {
             parshaTitle: "",
             aliyotRefs: [],
             currentAliyahIndex: 0,
             fontSize: 24,
-            bookmarkId: localStorage.getItem(STORAGE_KEY)
+            bookmarkId: localStorage.getItem(STORAGE_KEY),
+            bookmarkPosition: null,
+            readingPosition: null,
+            verseCounts: {}
         };
+
+        const inFlightRequests = new Map();
+        let prefetchScheduled = false;
+        let loadSequence = 0;
+        let scrollUpdateTimer = null;
 
         function getNextSaturday() {
             const d = new Date();
             const day = d.getDay();
             const diff = 6 - day + (day === 6 ? 7 : 0);
             const nextSaturday = new Date(d);
-            nextSaturday.setHours(23, 59, 59, 999);
+            // The application is not opened during Shabbat, so the next visit on
+            // Saturday is the correct point to start the new weekly parasha.
+            nextSaturday.setHours(0, 0, 0, 0);
             nextSaturday.setDate(d.getDate() + diff);
             return nextSaturday.getTime();
         }
@@ -279,18 +309,20 @@
         };
 
         function checkExpiration() {
-            const storedState = localStorage.getItem(STATE_KEY);
-            if (storedState) {
-                const data = JSON.parse(storedState);
-                if (Date.now() > data.expiration) {
-                    localStorage.removeItem(STATE_KEY);
-                    localStorage.removeItem(STORAGE_KEY);
-                    state.bookmarkId = null;
-                    PersistentCache.clearAll();
-                    return null;
+            try {
+                const storedState = localStorage.getItem(STATE_KEY);
+                if (storedState) {
+                    const data = JSON.parse(storedState);
+                    if (data.weeklyBoundaryVersion !== WEEKLY_BOUNDARY_VERSION || Date.now() >= data.expiration) {
+                        localStorage.removeItem(STATE_KEY);
+                        localStorage.removeItem(STORAGE_KEY);
+                        state.bookmarkId = null;
+                        PersistentCache.clearAll();
+                        return null;
+                    }
+                    return data;
                 }
-                return data;
-            }
+            } catch (e) { PersistentCache.clearAll(); }
             return null;
         }
 
@@ -301,6 +333,9 @@
                 aliyotRefs: state.aliyotRefs,
                 currentAliyahIndex: state.currentAliyahIndex,
                 fontSize: state.fontSize,
+                bookmarkPosition: state.bookmarkPosition,
+                verseCounts: state.verseCounts,
+                weeklyBoundaryVersion: WEEKLY_BOUNDARY_VERSION,
                 expiration: existing.expiration || getNextSaturday()
             };
             localStorage.setItem(STATE_KEY, JSON.stringify(data));
@@ -317,6 +352,12 @@
                 state.aliyotRefs = savedData.aliyotRefs;
                 state.currentAliyahIndex = savedData.currentAliyahIndex;
                 state.fontSize = savedData.fontSize || 24;
+                state.bookmarkPosition = savedData.bookmarkPosition || null;
+                state.verseCounts = savedData.verseCounts || {};
+                if (state.bookmarkId && Number.isInteger(state.bookmarkPosition?.aliyahIndex) &&
+                    state.bookmarkPosition.aliyahIndex >= 0 && state.bookmarkPosition.aliyahIndex < state.aliyotRefs.length) {
+                    state.currentAliyahIndex = state.bookmarkPosition.aliyahIndex;
+                }
                 document.getElementById('main-div').style.fontSize = state.fontSize + "px";
                 loadAliyah(state.currentAliyahIndex);
                 schedulePrefetch();
@@ -331,13 +372,26 @@
                     const id = e.target.getAttribute('data-id');
                     if (state.bookmarkId === id) {
                         state.bookmarkId = null;
+                        state.bookmarkPosition = null;
                         localStorage.removeItem(STORAGE_KEY);
                     } else {
                         state.bookmarkId = id;
+                        state.bookmarkPosition = {
+                            aliyahIndex: Number(e.target.dataset.aliyahIndex),
+                            verseIndex: Number(e.target.dataset.verseIndex)
+                        };
+                        state.readingPosition = state.bookmarkPosition;
                         localStorage.setItem(STORAGE_KEY, id);
                     }
                     renderBookmarkStyles();
+                    saveState();
+                    updateProgressEstimate();
                 }
+            });
+
+            window.addEventListener('scroll', scheduleReadingPositionUpdate, { passive: true });
+            document.addEventListener('visibilitychange', () => {
+                if (!document.hidden) schedulePrefetch();
             });
         });
 
@@ -357,6 +411,11 @@
 
                 state.parshaTitle = parshaItem.displayValue.he;
                 state.aliyotRefs = parshaItem.extraDetails.aliyot.slice(0, 7);
+                state.verseCounts = {};
+                state.bookmarkPosition = null;
+                state.readingPosition = null;
+                state.bookmarkId = null;
+                localStorage.removeItem(STORAGE_KEY);
                 saveState();
                 loadAliyah(0);
                 schedulePrefetch();
@@ -364,13 +423,16 @@
         }
 
         async function loadAliyah(index) {
+            const sequence = ++loadSequence;
             state.currentAliyahIndex = index;
+            state.readingPosition = null;
             saveState();
             const ref = state.aliyotRefs[index];
             updateUI();
 
             const cached = PersistentCache.get(ref);
             if (cached) {
+                recordVerseCount(ref, cached.length);
                 renderAliyah(cached);
                 return;
             }
@@ -379,37 +441,64 @@
                 const data = await fetchAliyahData(ref);
                 if (data) {
                     PersistentCache.set(ref, data);
-                    renderAliyah(data);
+                    recordVerseCount(ref, data.length);
+                    if (sequence === loadSequence) renderAliyah(data);
                 }
             } catch (err) { console.error(err); }
         }
 
         function schedulePrefetch() {
-            setTimeout(prefetchNextBatch, 2000);
+            const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+            if (prefetchScheduled || document.hidden || connection?.saveData || connection?.effectiveType === '2g') return;
+            prefetchScheduled = true;
+            const run = () => {
+                prefetchScheduled = false;
+                prefetchNextBatch();
+            };
+            if ('requestIdleCallback' in window) window.requestIdleCallback(run, { timeout: 3000 });
+            else setTimeout(run, 1500);
         }
 
         async function prefetchNextBatch() {
             for (let i = 0; i < state.aliyotRefs.length; i++) {
+                if (document.hidden) return;
                 const ref = state.aliyotRefs[i];
                 if (!PersistentCache.get(ref)) {
                     try {
                         const data = await fetchAliyahData(ref);
-                        if (data) PersistentCache.set(ref, data);
-                        await new Promise(r => setTimeout(r, 500));
+                        if (data) {
+                            PersistentCache.set(ref, data);
+                            recordVerseCount(ref, data.length);
+                        }
                     } catch (e) { }
                 }
             }
         }
 
         async function fetchAliyahData(ref) {
-            const [cRes, oRes] = await Promise.all([
-                fetch(`${API_BASE}/v3/texts/${encodeURIComponent(ref)}?return_format=strip_only_footnotes`),
-                fetch(`${API_BASE}/v3/texts/${encodeURIComponent('Onkelos ' + ref)}?return_format=text_only`)
-            ]);
-            const cJson = await cRes.json();
-            const oJson = await oRes.json();
-            if (cJson.error || oJson.error) return null;
-            return processData(cJson, oJson);
+            if (inFlightRequests.has(ref)) return inFlightRequests.get(ref);
+            const request = (async () => {
+                const [cRes, oRes] = await Promise.all([
+                    fetch(`${API_BASE}/v3/texts/${encodeURIComponent(ref)}?return_format=strip_only_footnotes`),
+                    fetch(`${API_BASE}/v3/texts/${encodeURIComponent('Onkelos ' + ref)}?return_format=text_only`)
+                ]);
+                if (!cRes.ok || !oRes.ok) return null;
+                const [cJson, oJson] = await Promise.all([cRes.json(), oRes.json()]);
+                return (cJson.error || oJson.error) ? null : processData(cJson, oJson);
+            })();
+            inFlightRequests.set(ref, request);
+            try {
+                return await request;
+            } finally {
+                inFlightRequests.delete(ref);
+            }
+        }
+
+        function recordVerseCount(ref, count) {
+            if (state.verseCounts[ref] === count) return;
+            state.verseCounts[ref] = count;
+            saveState();
+            updateProgressEstimate();
         }
 
         function cleanSefariaHtml(html) {
@@ -453,6 +542,10 @@
 
         function renderAliyah(data) {
             const container = document.getElementById('verses-container');
+            state.readingPosition = null;
+            if (state.bookmarkId && state.bookmarkPosition?.aliyahIndex === state.currentAliyahIndex) {
+                state.readingPosition = state.bookmarkPosition;
+            }
             let htmlChunks = [];
             for (let i = 0; i < data.length; i++) {
                 const row = data[i];
@@ -464,7 +557,7 @@
                 const displayH = cleanSefariaHtml(row.h);
                 const displayO = cleanSefariaHtml(row.o);
                 htmlChunks.push(`<span class="verse-sequence">` +
-                    `<span class="possuk-number ${bCls}" data-id="${id}">${getHNum(row.n)}</span>` +
+                    `<span class="possuk-number ${bCls}" data-id="${id}" data-aliyah-index="${state.currentAliyahIndex}" data-verse-index="${i}">${getHNum(row.n)}</span>` +
                     `<span class="hebrew-text">${displayH}</span>` +
                     `<span class="hebrew-text">${displayH}</span>` +
                     `<span class="targum-text">${displayO}</span>` +
@@ -477,6 +570,8 @@
             const activeMark = document.querySelector('.bookmark-active');
             if (activeMark) activeMark.scrollIntoView({ behavior: 'auto', block: 'center' });
             else window.scrollTo(0, 0);
+            updateProgressEstimate();
+            scheduleReadingPositionUpdate();
         }
 
         function getHNum(n) { return (n > 0 && n <= HEB_NUMBERS.length) ? HEB_NUMBERS[n - 1] : n; }
@@ -490,6 +585,48 @@
             const footerBtn = document.getElementById('footer-next-btn');
             footerBtn.innerText = (idx === state.aliyotRefs.length - 1) ? ("חזור ל" + ALIYAH_NAMES[0]) : ALIYAH_NAMES[idx + 1];
             document.getElementById('footer-nav').classList.remove('hidden');
+            updateProgressEstimate();
+        }
+
+        function updateProgressEstimate() {
+            const progress = document.getElementById('parsha-progress');
+            if (!state.aliyotRefs.length) return;
+            const counts = state.aliyotRefs.map(ref => state.verseCounts[ref]);
+            if (counts.some(count => !Number.isFinite(count))) {
+                progress.textContent = 'נותר בפרשה: מחשב...';
+                return;
+            }
+            const position = state.readingPosition || {
+                aliyahIndex: state.currentAliyahIndex,
+                verseIndex: -1
+            };
+            const completed = counts.slice(0, position.aliyahIndex).reduce((sum, count) => sum + count, 0) + position.verseIndex + 1;
+            const total = counts.reduce((sum, count) => sum + count, 0);
+            const remaining = Math.max(0, Math.round(((total - completed) / total) * 100));
+            progress.textContent = `נותר בפרשה: כ-${remaining}%`;
+        }
+
+        function scheduleReadingPositionUpdate() {
+            clearTimeout(scrollUpdateTimer);
+            scrollUpdateTimer = setTimeout(updateReadingPositionFromScroll, 180);
+        }
+
+        function updateReadingPositionFromScroll() {
+            const verseButtons = document.querySelectorAll('.possuk-number');
+            if (!verseButtons.length) return;
+
+            const readingLine = window.innerHeight * 0.3;
+            let current = verseButtons[0];
+            for (const button of verseButtons) {
+                if (button.getBoundingClientRect().top > readingLine) break;
+                current = button;
+            }
+
+            state.readingPosition = {
+                aliyahIndex: Number(current.dataset.aliyahIndex),
+                verseIndex: Number(current.dataset.verseIndex)
+            };
+            updateProgressEstimate();
         }
 
         window.handleFooterClick = (e) => {
