@@ -254,7 +254,7 @@
 
     <script>
         const API_BASE = "https://www.sefaria.org/api";
-        const HEB_NUMBERS = ["א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט", "י", "יא", "יב", "יג", "יד", "טו", "טז", "יז", "יח", "יט", "כ", "כא", "כב", "כג", "כד", "כה", "כו", "כז", "כח", "כט", "ל", "לא", "לב", "לג", "לד", "לה", "לו", "לז", "לח", "לט", "מ", "מא", "מב", "מג", "מד", "מה", "מו", "מז", "מח", "מט", "נ", "נא", "נב", "נג", "נד", "נה", "נו", "נז", "נח", "נט", "ס", "סא", "סב", "סג", "סד", "סה", "סu", "סז", "סח", "סט", "ע", "עא", "עב", "עג", "עד", "עה", "עו", "עז", "עח", "עט", "פ", "פא", "פב", "פג", "פד", "פה", "פו", "פז", "פח", "פט", "צ", "צא", "צב", "צג", "צד", "צה", "צו", "צז", "צח", "צט", "ק"];
+        const HEB_NUMBERS = ["א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט", "י", "יא", "יב", "יג", "יד", "טו", "טז", "יז", "יח", "יט", "כ", "כא", "כב", "כג", "כד", "כה", "כו", "כז", "כח", "כט", "ל", "לא", "לב", "לג", "לד", "לה", "לו", "לז", "לח", "לט", "מ", "מא", "מב", "מג", "מד", "מה", "מו", "מז", "מח", "מט", "נ", "נא", "נב", "נג", "נד", "נה", "נו", "נז", "נח", "נט", "ס", "סא", "סב", "סג", "סד", "סה", "סו", "סז", "סח", "סט", "ע", "עא", "עב", "עג", "עד", "עה", "עו", "עז", "עח", "עט", "פ", "פא", "פב", "פג", "פד", "פה", "פו", "פז", "פח", "פט", "צ", "צא", "צב", "צג", "צד", "צה", "צו", "צז", "צח", "צט", "ק"];
         const ALIYAH_NAMES = ["ראשון", "שני", "שלישי", "רביעי", "חמישי", "שישי", "שביעי"];
         const STORAGE_KEY = 'shnayim_bookmark_v2';
         const STATE_KEY = 'shnayim_state_v1';
@@ -276,6 +276,8 @@
         let prefetchScheduled = false;
         let loadSequence = 0;
         let scrollUpdateTimer = null;
+        let saveTimer = null;
+        const PREFETCH_BATCH_SIZE = 2;
 
         function getNextSaturday() {
             const d = new Date();
@@ -341,6 +343,22 @@
             localStorage.setItem(STATE_KEY, JSON.stringify(data));
         }
 
+        function scheduleSave() {
+            if (saveTimer) return;
+            saveTimer = setTimeout(() => {
+                saveTimer = null;
+                saveState();
+            }, 500);
+        }
+
+        function flushSave() {
+            if (saveTimer) {
+                clearTimeout(saveTimer);
+                saveTimer = null;
+                saveState();
+            }
+        }
+
         document.addEventListener('DOMContentLoaded', async () => {
             if ('serviceWorker' in navigator && window.location.protocol.indexOf('http') === 0) {
                 navigator.serviceWorker.register('./sw.js').catch(console.error);
@@ -389,8 +407,10 @@
             });
 
             window.addEventListener('scroll', scheduleReadingPositionUpdate, { passive: true });
+            window.addEventListener('pagehide', flushSave);
             document.addEventListener('visibilitychange', () => {
-                if (!document.hidden) schedulePrefetch();
+                if (document.hidden) flushSave();
+                else schedulePrefetch();
             });
         });
 
@@ -438,7 +458,7 @@
             const sequence = ++loadSequence;
             state.currentAliyahIndex = index;
             state.readingPosition = null;
-            saveState();
+            scheduleSave();
             const ref = state.aliyotRefs[index];
             updateUI();
 
@@ -446,6 +466,7 @@
             if (cached) {
                 recordVerseCount(ref, cached.length);
                 renderAliyah(cached);
+                schedulePrefetch();
                 return;
             }
 
@@ -472,7 +493,8 @@
         }
 
         async function prefetchNextBatch() {
-            for (let i = 0; i < state.aliyotRefs.length; i++) {
+            let fetched = 0;
+            for (let i = state.currentAliyahIndex + 1; i < state.aliyotRefs.length; i++) {
                 if (document.hidden) return;
                 const ref = state.aliyotRefs[i];
                 if (!PersistentCache.get(ref)) {
@@ -483,6 +505,11 @@
                             recordVerseCount(ref, data.length);
                         }
                     } catch (e) { }
+                    fetched++;
+                }
+                if (fetched >= PREFETCH_BATCH_SIZE) {
+                    schedulePrefetch();
+                    return;
                 }
             }
         }
@@ -509,7 +536,7 @@
         function recordVerseCount(ref, count) {
             if (state.verseCounts[ref] === count) return;
             state.verseCounts[ref] = count;
-            saveState();
+            scheduleSave();
             updateProgressEstimate();
         }
 
@@ -624,6 +651,7 @@
         }
 
         function updateReadingPositionFromScroll() {
+            if (document.hidden) return;
             const verseButtons = document.querySelectorAll('.possuk-number');
             if (!verseButtons.length) return;
 
@@ -656,6 +684,7 @@
         window.adjustFont = (d) => {
             state.fontSize = Math.max(16, Math.min(45, state.fontSize + d));
             document.getElementById('main-div').style.fontSize = state.fontSize + "px";
+            scheduleSave();
         };
     </script>
 </body>
