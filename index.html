@@ -259,7 +259,7 @@
         const STORAGE_KEY = 'shnayim_bookmark_v2';
         const STATE_KEY = 'shnayim_state_v1';
         const CACHE_PREFIX = 'shnayim_cache_';
-        const WEEKLY_BOUNDARY_VERSION = 2;
+        const WEEKLY_BOUNDARY_VERSION = 3;
 
         const state = {
             parshaTitle: "",
@@ -363,8 +363,7 @@
                 schedulePrefetch();
             } else {
                 document.getElementById('main-div').style.fontSize = state.fontSize + "px";
-                const today = new Date();
-                await loadCalendar(today.toISOString().split('T')[0]);
+                await loadCalendar(new Date());
             }
 
             document.getElementById('verses-container').addEventListener('click', (e) => {
@@ -402,8 +401,21 @@
             });
         }
 
-        async function loadCalendar(dateStr) {
+        function getLocalDateStr(d) {
+            const pad = (n) => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+        }
+
+        async function loadCalendar(date) {
             try {
+                // The calendar API returns the parasha read on Shabbat for the whole
+                // week, including Saturday. The new weekly parasha only starts on
+                // Sunday, so on Saturday we must query the following day.
+                if (date.getDay() === 6) {
+                    date = new Date(date);
+                    date.setDate(date.getDate() + 1);
+                }
+                const dateStr = getLocalDateStr(date);
                 const res = await fetch(`${API_BASE}/calendars?diaspora=0&year=${dateStr.split('-')[0]}&month=${dateStr.split('-')[1]}&day=${dateStr.split('-')[2]}`);
                 const data = await res.json();
                 const parshaItem = data.calendar_items.find(item => item.title.en === "Parashat Hashavua");
