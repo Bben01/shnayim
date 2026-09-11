@@ -583,12 +583,24 @@
         const STATE_KEY = 'shnayim_state_v1';
         const CACHE_PREFIX = 'shnayim_cache_';
         const GEMARA_CACHE_PREFIX = 'shnayim_gemara_cache_';
-        const GEMARA_CACHE_VERSION = 2;
+        const GEMARA_CACHE_VERSION = 3;
         const GEMARA_ENABLED_KEY = 'shnayim_gemara_enabled_v1';
-        const WEEKLY_BOUNDARY_VERSION = 3;
+        const WEEKLY_BOUNDARY_VERSION = 4;
+        // Festival readings also have the API title "Parashat Hashavua".
+        // Exclude them, including the Simchat Torah reading, from preparation.
+        const REGULAR_PARASHOT = new Set([
+            'בראשית', 'נח', 'לך לך', 'וירא', 'חיי שרה', 'תולדות', 'ויצא', 'וישלח',
+            'וישב', 'מקץ', 'ויגש', 'ויחי', 'שמות', 'וארא', 'בא', 'בשלח', 'יתרו',
+            'משפטים', 'תרומה', 'תצוה', 'כי תשא', 'ויקהל', 'פקודי', 'ויקרא', 'צו',
+            'שמיני', 'תזריע', 'מצורע', 'מצרע', 'אחרי מות', 'קדושים', 'אמור', 'בהר',
+            'בחוקותי', 'במדבר', 'נשא', 'בהעלותך', 'שלח', 'קרח', 'חקת', 'בלק',
+            'פינחס', 'מטות', 'מסעי', 'דברים', 'ואתחנן', 'עקב', 'ראה', 'שופטים',
+            'כי תצא', 'כי תבוא', 'נצבים', 'וילך', 'האזינו'
+        ].map(name => name.replace(/\s/g, '')));
 
         const state = {
             parshaTitle: "",
+            expiration: null,
             aliyotRefs: [],
             currentAliyahIndex: 0,
             fontSize: 24,
@@ -612,8 +624,7 @@
         let gemaraDrawerHeight = null;
         const PREFETCH_BATCH_SIZE = 2;
 
-        function getNextSaturday() {
-            const d = new Date();
+        function getNextSaturday(d = new Date()) {
             const day = d.getDay();
             const diff = 6 - day + (day === 6 ? 7 : 0);
             const nextSaturday = new Date(d);
@@ -703,7 +714,7 @@
                 bookmarkAutoFocus: state.bookmarkAutoFocus,
                 verseCounts: state.verseCounts,
                 weeklyBoundaryVersion: WEEKLY_BOUNDARY_VERSION,
-                expiration: existing.expiration || getNextSaturday()
+                expiration: state.expiration || existing.expiration || getNextSaturday()
             };
             localStorage.setItem(STATE_KEY, JSON.stringify(data));
         }
@@ -734,6 +745,7 @@
             const savedData = checkExpiration();
             if (savedData) {
                 state.parshaTitle = savedData.parshaTitle;
+                state.expiration = savedData.expiration;
                 state.aliyotRefs = savedData.aliyotRefs;
                 state.currentAliyahIndex = savedData.currentAliyahIndex;
                 state.fontSize = savedData.fontSize || 24;
@@ -821,22 +833,44 @@
             return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
         }
 
-        async function loadCalendar(date) {
-            try {
-                // The calendar API returns the parasha read on Shabbat for the whole
-                // week, including Saturday. The new weekly parasha only starts on
-                // Sunday, so on Saturday we must query the following day.
-                if (date.getDay() === 6) {
-                    date = new Date(date);
-                    date.setDate(date.getDate() + 1);
-                }
+        function isRegularParsha(item) {
+            if (item?.title?.en !== 'Parashat Hashavua') return false;
+            const names = (item.displayValue?.he || '').split(/[-־–—]/);
+            return names.length <= 2 && names.every(name =>
+                REGULAR_PARASHOT.has(name.replace(/[\s\u0591-\u05BD\u05BF-\u05C7]/g, ''))
+            );
+        }
+
+        async function findNextRegularParsha(date) {
+            date = new Date(date);
+            // Saturday visits prepare for the following week, as before.
+            if (date.getDay() === 6) date.setDate(date.getDate() + 1);
+
+            // Multiple consecutive Shabbatot can have festival readings.
+            // Bound the lookahead in case the API stops returning regular portions.
+            for (let week = 0; week < 8; week++) {
                 const dateStr = getLocalDateStr(date);
                 const res = await fetch(`${API_BASE}/calendars?diaspora=0&year=${dateStr.split('-')[0]}&month=${dateStr.split('-')[1]}&day=${dateStr.split('-')[2]}`);
+                if (!res.ok) throw new Error(`Calendar request failed: ${res.status}`);
                 const data = await res.json();
-                const parshaItem = data.calendar_items.find(item => item.title.en === "Parashat Hashavua");
-                if (!parshaItem) return;
+                if (!Array.isArray(data.calendar_items)) throw new Error('Invalid calendar response');
+                const parshaItem = data.calendar_items.find(isRegularParsha);
+                if (parshaItem) {
+                    if (!Array.isArray(parshaItem.extraDetails?.aliyot) || parshaItem.extraDetails.aliyot.length < 7) {
+                        throw new Error('Missing parasha aliyot');
+                    }
+                    return { parshaItem, expiration: getNextSaturday(date) };
+                }
+                date.setDate(date.getDate() + 7);
+            }
+            throw new Error('No regular parasha found in the next eight weeks');
+        }
 
+        async function loadCalendar(date) {
+            try {
+                const { parshaItem, expiration } = await findNextRegularParsha(date);
                 state.parshaTitle = parshaItem.displayValue.he;
+                state.expiration = expiration;
                 state.aliyotRefs = parshaItem.extraDetails.aliyot.slice(0, 7);
                 state.verseCounts = {};
                 state.bookmarkPosition = null;
@@ -1031,10 +1065,9 @@
             const ref = link.sourceRef || link.ref;
             const heRef = link.sourceHeRef || link.heRef || '';
             const tractateHe = link.collectiveTitle?.he || link.heTitle || '';
-            // Only daf/amud references have segment numbers to remove here.
-            // Other works in Sefaria's Talmud category use chapter/verse numbering.
-            const match = ref.match(/^(.+ \d+[ab])(?::\d+)?(?:-(?:(\d+[ab])(?::\d+)?|\d+))?$/);
-            if (!match) return { ref, heRef, tractateHe };
+            // Exclude non-daf works even when Sefaria categorizes them as Talmud.
+            const match = typeof ref === 'string' && ref.match(/^(.+ \d+[ab])(?::\d+)?(?:-(?:(\d+[ab])(?::\d+)?|\d+))?$/);
+            if (!match) return null;
 
             const endPage = match[2];
             const isPageRange = endPage && !match[1].endsWith(` ${endPage}`);
@@ -1064,6 +1097,7 @@
                     const sourceRef = link.sourceRef || link.ref;
                     if (!sourceRef) continue;
                     const pageLink = normalizeGemaraLink(link);
+                    if (!pageLink) continue;
                     const anchors = Array.isArray(link.anchorRefExpanded) && link.anchorRefExpanded.length
                         ? link.anchorRefExpanded
                         : [link.anchorRef];
