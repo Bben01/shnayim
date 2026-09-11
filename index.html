@@ -583,6 +583,7 @@
         const STATE_KEY = 'shnayim_state_v1';
         const CACHE_PREFIX = 'shnayim_cache_';
         const GEMARA_CACHE_PREFIX = 'shnayim_gemara_cache_';
+        const GEMARA_CACHE_VERSION = 2;
         const GEMARA_ENABLED_KEY = 'shnayim_gemara_enabled_v1';
         const WEEKLY_BOUNDARY_VERSION = 3;
 
@@ -650,14 +651,16 @@
                     if (Date.now() > (params.expiration || 0)) return null;
                     const item = localStorage.getItem(GEMARA_CACHE_PREFIX + aliyahRef);
                     if (!item) return null;
-                    const data = JSON.parse(item);
+                    const cached = JSON.parse(item);
+                    if (cached.version !== GEMARA_CACHE_VERSION) return null;
+                    const data = cached.data;
                     gemaraMemoryCache.set(aliyahRef, data);
                     return data;
                 } catch (e) { return null; }
             },
             set: (aliyahRef, data) => {
                 gemaraMemoryCache.set(aliyahRef, data);
-                try { localStorage.setItem(GEMARA_CACHE_PREFIX + aliyahRef, JSON.stringify(data)); } catch (e) { }
+                try { localStorage.setItem(GEMARA_CACHE_PREFIX + aliyahRef, JSON.stringify({ version: GEMARA_CACHE_VERSION, data })); } catch (e) { }
             },
             clearAll: () => {
                 gemaraMemoryCache.clear();
@@ -1024,6 +1027,24 @@
                 .replace(/'/g, '&#039;');
         }
 
+        function normalizeGemaraLink(link) {
+            const ref = link.sourceRef || link.ref;
+            const heRef = link.sourceHeRef || link.heRef || '';
+            const tractateHe = link.collectiveTitle?.he || link.heTitle || '';
+            // Only daf/amud references have segment numbers to remove here.
+            // Other works in Sefaria's Talmud category use chapter/verse numbering.
+            const match = ref.match(/^(.+ \d+[ab])(?::\d+)?(?:-(?:(\d+[ab])(?::\d+)?|\d+))?$/);
+            if (!match) return { ref, heRef, tractateHe };
+
+            const endPage = match[2];
+            const isPageRange = endPage && !match[1].endsWith(` ${endPage}`);
+            return {
+                ref: match[1] + (isPageRange ? `-${endPage}` : ''),
+                heRef: isPageRange ? heRef.replace(/:[^-]+/g, '') : heRef.split(/[:-]/)[0],
+                tractateHe
+            };
+        }
+
         async function getGemaraLinksForAliyah(aliyahRef) {
             const cached = GemaraCache.get(aliyahRef);
             if (cached) return cached;
@@ -1042,20 +1063,17 @@
                     if (link.category !== 'Talmud' || /^Jerusalem Talmud\b/i.test(indexTitle)) continue;
                     const sourceRef = link.sourceRef || link.ref;
                     if (!sourceRef) continue;
+                    const pageLink = normalizeGemaraLink(link);
                     const anchors = Array.isArray(link.anchorRefExpanded) && link.anchorRefExpanded.length
                         ? link.anchorRefExpanded
                         : [link.anchorRef];
                     for (const anchorRef of anchors) {
                         if (!anchorRef) continue;
                         if (!seen.has(anchorRef)) seen.set(anchorRef, new Set());
-                        if (seen.get(anchorRef).has(sourceRef)) continue;
-                        seen.get(anchorRef).add(sourceRef);
+                        if (seen.get(anchorRef).has(pageLink.ref)) continue;
+                        seen.get(anchorRef).add(pageLink.ref);
                         if (!grouped[anchorRef]) grouped[anchorRef] = [];
-                        grouped[anchorRef].push({
-                            ref: sourceRef,
-                            heRef: link.sourceHeRef || link.heRef || '',
-                            tractateHe: link.collectiveTitle?.he || link.heTitle || ''
-                        });
+                        grouped[anchorRef].push(pageLink);
                     }
                 }
                 Object.values(grouped).forEach(links => links.sort((a, b) => a.ref.localeCompare(b.ref, 'en', { numeric: true })));
@@ -1144,7 +1162,7 @@
             document.getElementById('gemara-panel-content').innerHTML = links.length
                 ? `<ul id="gemara-links">${links.map(link =>
                     `<li><a class="gemara-source-link" href="https://www.sefaria.org/${encodeURIComponent(link.ref)}" target="_blank" rel="noopener noreferrer">` +
-                    `<span class="gemara-source-hebrew">${escapeHtml(link.heRef || link.tractateHe || link.ref)}</span></a></li>`
+                    `<span class="gemara-source-hebrew">${escapeHtml(link.heRef || link.ref)}</span></a></li>`
                 ).join('')}</ul>`
                 : `<p class="gemara-empty">לא נמצאו הפניות בתלמוד הבבלי לפסוק זה.</p>`;
         }

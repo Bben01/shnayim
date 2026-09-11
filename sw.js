@@ -1,4 +1,4 @@
-const CACHE_NAME_STATIC = 'shnayim-static-v10';
+const CACHE_NAME_STATIC = 'shnayim-static-v11';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
