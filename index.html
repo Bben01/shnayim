@@ -582,12 +582,29 @@
         const STORAGE_KEY = 'shnayim_bookmark_v2';
         const STATE_KEY = 'shnayim_state_v1';
         const CACHE_PREFIX = 'shnayim_cache_';
+        // v2 rows are pre-cleaned and carry petuhah/setumah flags.
+        const TEXT_CACHE_PREFIX = CACHE_PREFIX + 'v2_';
         const GEMARA_CACHE_PREFIX = 'shnayim_gemara_cache_';
         const GEMARA_CACHE_VERSION = 3;
         const GEMARA_ENABLED_KEY = 'shnayim_gemara_enabled_v1';
-        const WEEKLY_BOUNDARY_VERSION = 4;
+        const WEEKLY_BOUNDARY_VERSION = 5;
+        const LAST_RELOAD_KEY = 'shnayim_last_reload';
+        const UPDATE_RELOAD_KEY = 'shnayim_update_reload';
+        const DOUBLE_RELOAD_WINDOW = 15000;
+        // Sefaria never lists Vezot Haberacha as a weekly reading, so it is supplied locally.
+        const VEZOT_HABERACHA = {
+            title: { en: 'Parashat Hashavua', he: 'פרשת השבוע' },
+            displayValue: { en: "V'Zot HaBerachah", he: 'וזאת הברכה' },
+            extraDetails: {
+                aliyot: [
+                    'Deuteronomy 33:1-33:7', 'Deuteronomy 33:8-33:12', 'Deuteronomy 33:13-33:17',
+                    'Deuteronomy 33:18-33:21', 'Deuteronomy 33:22-33:26', 'Deuteronomy 33:27-33:29',
+                    'Deuteronomy 34:1-34:12'
+                ]
+            }
+        };
         // Festival readings also have the API title "Parashat Hashavua".
-        // Exclude them, including the Simchat Torah reading, from preparation.
+        // Exclude them from preparation.
         const REGULAR_PARASHOT = new Set([
             'בראשית', 'נח', 'לך לך', 'וירא', 'חיי שרה', 'תולדות', 'ויצא', 'וישלח',
             'וישב', 'מקץ', 'ויגש', 'ויחי', 'שמות', 'וארא', 'בא', 'בשלח', 'יתרו',
@@ -615,14 +632,12 @@
         const inFlightRequests = new Map();
         const inFlightGemaraRequests = new Map();
         const gemaraMemoryCache = new Map();
-        let prefetchScheduled = false;
         let loadSequence = 0;
         let scrollUpdateTimer = null;
         let saveTimer = null;
         let lastGemaraTrigger = null;
         let gemaraDrawerDrag = null;
         let gemaraDrawerHeight = null;
-        const PREFETCH_BATCH_SIZE = 2;
 
         function getNextSaturday(d = new Date()) {
             const day = d.getDay();
@@ -637,15 +652,14 @@
 
         const PersistentCache = {
             get: (key) => {
+                if (Date.now() > (state.expiration || 0)) return null;
                 try {
-                    const params = JSON.parse(localStorage.getItem(STATE_KEY) || '{}');
-                    if (Date.now() > (params.expiration || 0)) return null;
-                    const item = localStorage.getItem(CACHE_PREFIX + key);
+                    const item = localStorage.getItem(TEXT_CACHE_PREFIX + key);
                     return item ? JSON.parse(item) : null;
                 } catch (e) { return null; }
             },
             set: (key, data) => {
-                try { localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(data)); } catch (e) { }
+                try { localStorage.setItem(TEXT_CACHE_PREFIX + key, JSON.stringify(data)); } catch (e) { }
             },
             clearAll: () => {
                 Object.keys(localStorage).forEach(k => {
@@ -657,9 +671,8 @@
         const GemaraCache = {
             get: (aliyahRef) => {
                 if (gemaraMemoryCache.has(aliyahRef)) return gemaraMemoryCache.get(aliyahRef);
+                if (Date.now() > (state.expiration || 0)) return null;
                 try {
-                    const params = JSON.parse(localStorage.getItem(STATE_KEY) || '{}');
-                    if (Date.now() > (params.expiration || 0)) return null;
                     const item = localStorage.getItem(GEMARA_CACHE_PREFIX + aliyahRef);
                     if (!item) return null;
                     const cached = JSON.parse(item);
@@ -704,7 +717,6 @@
         }
 
         function saveState() {
-            const existing = JSON.parse(localStorage.getItem(STATE_KEY) || '{}');
             const data = {
                 parshaTitle: state.parshaTitle,
                 aliyotRefs: state.aliyotRefs,
@@ -714,7 +726,7 @@
                 bookmarkAutoFocus: state.bookmarkAutoFocus,
                 verseCounts: state.verseCounts,
                 weeklyBoundaryVersion: WEEKLY_BOUNDARY_VERSION,
-                expiration: state.expiration || existing.expiration || getNextSaturday()
+                expiration: state.expiration || getNextSaturday()
             };
             localStorage.setItem(STATE_KEY, JSON.stringify(data));
         }
@@ -735,9 +747,48 @@
             }
         }
 
+        // The service worker serves a cached app, so two quick reloads fetch the latest version.
+        async function checkForUpdateOnDoubleReload() {
+            if (sessionStorage.getItem(UPDATE_RELOAD_KEY)) {
+                sessionStorage.removeItem(UPDATE_RELOAD_KEY);
+                return;
+            }
+            const controller = navigator.serviceWorker.controller;
+            if (!controller || performance.getEntriesByType('navigation')[0]?.type !== 'reload') {
+                sessionStorage.removeItem(LAST_RELOAD_KEY);
+                return;
+            }
+            const lastReload = Number(sessionStorage.getItem(LAST_RELOAD_KEY));
+            if (!lastReload || Date.now() - lastReload > DOUBLE_RELOAD_WINDOW) {
+                sessionStorage.setItem(LAST_RELOAD_KEY, String(Date.now()));
+                return;
+            }
+            sessionStorage.removeItem(LAST_RELOAD_KEY);
+            const reloadOnce = () => {
+                sessionStorage.setItem(UPDATE_RELOAD_KEY, '1');
+                location.reload();
+            };
+            try {
+                const registration = await navigator.serviceWorker.getRegistration();
+                await registration?.update();
+                if (registration?.installing || registration?.waiting) {
+                    // The new worker skips waiting and claims this page once its assets are cached.
+                    navigator.serviceWorker.addEventListener('controllerchange', reloadOnce, { once: true });
+                    return;
+                }
+                const refreshed = await new Promise(resolve => {
+                    const channel = new MessageChannel();
+                    channel.port1.onmessage = e => resolve(e.data?.refreshed);
+                    controller.postMessage({ type: 'refresh-assets' }, [channel.port2]);
+                });
+                if (refreshed) reloadOnce();
+            } catch (e) { console.error(e); }
+        }
+
         document.addEventListener('DOMContentLoaded', async () => {
             if ('serviceWorker' in navigator && window.location.protocol.indexOf('http') === 0) {
                 navigator.serviceWorker.register('./sw.js').catch(console.error);
+                checkForUpdateOnDoubleReload();
             }
 
             applyGemaraPreference();
@@ -759,7 +810,6 @@
                 }
                 document.getElementById('main-div').style.fontSize = state.fontSize + "px";
                 loadAliyah(state.currentAliyahIndex);
-                schedulePrefetch();
             } else {
                 document.getElementById('main-div').style.fontSize = state.fontSize + "px";
                 await loadCalendar(new Date());
@@ -817,7 +867,7 @@
             window.addEventListener('pagehide', flushSave);
             document.addEventListener('visibilitychange', () => {
                 if (document.hidden) flushSave();
-                else schedulePrefetch();
+                else prefetchRemainingAliyot();
             });
         });
 
@@ -841,10 +891,32 @@
             );
         }
 
+        const hebrewDateFormat = new Intl.DateTimeFormat('en-u-ca-hebrew', { day: 'numeric', month: 'long' });
+
+        function getTishriDay(d) {
+            const parts = hebrewDateFormat.formatToParts(d);
+            return parts.find(p => p.type === 'month')?.value === 'Tishri'
+                ? Number(parts.find(p => p.type === 'day').value) : null;
+        }
+
+        // Haazinu always precedes Sukkot, so an upcoming Shabbat of Yom Kippur (10), Sukkot or
+        // Bereshit (15+) means only Vezot Haberacha remains before Simchat Torah (22 Tishri, Israel).
+        function getVezotHaberacha(date) {
+            const today = getTishriDay(date);
+            const shabbat = getTishriDay(new Date(getNextSaturday(date)));
+            if (!today || today >= 22 || !(shabbat === 10 || shabbat >= 15)) return null;
+            const simchatTorah = new Date(date);
+            simchatTorah.setHours(0, 0, 0, 0);
+            simchatTorah.setDate(simchatTorah.getDate() + 22 - today);
+            return { parshaItem: VEZOT_HABERACHA, expiration: simchatTorah.getTime() };
+        }
+
         async function findNextRegularParsha(date) {
             date = new Date(date);
             // Saturday visits prepare for the following week, as before.
             if (date.getDay() === 6) date.setDate(date.getDate() + 1);
+            const vezot = getVezotHaberacha(date);
+            if (vezot) return vezot;
 
             // Multiple consecutive Shabbatot can have festival readings.
             // Bound the lookahead in case the API stops returning regular portions.
@@ -881,7 +953,6 @@
                 GemaraCache.clearAll();
                 saveState();
                 loadAliyah(0);
-                schedulePrefetch();
             } catch (err) { console.error(err); }
         }
 
@@ -898,71 +969,81 @@
             if (cached) {
                 recordVerseCount(ref, cached.length);
                 renderAliyah(cached);
-                schedulePrefetch();
+                prefetchRemainingAliyot();
                 return;
             }
 
+            const request = fetchAliyahData(ref);
+            // Sent alongside the current aliyah so the whole parasha costs one round trip.
+            prefetchRemainingAliyot();
             try {
-                const data = await fetchAliyahData(ref);
-                if (data) {
-                    PersistentCache.set(ref, data);
-                    recordVerseCount(ref, data.length);
-                    if (sequence === loadSequence) renderAliyah(data);
-                }
+                const data = await request;
+                if (data && sequence === loadSequence) renderAliyah(data);
             } catch (err) { console.error(err); }
         }
 
-        function schedulePrefetch() {
+        function prefetchRemainingAliyot() {
             const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-            if (prefetchScheduled || document.hidden || connection?.saveData || connection?.effectiveType === '2g') return;
-            prefetchScheduled = true;
-            const run = () => {
-                prefetchScheduled = false;
-                prefetchNextBatch();
+            if (document.hidden || connection?.saveData || connection?.effectiveType === '2g') return;
+            let run = [];
+            const flush = () => {
+                if (run.length) fetchAliyot(run, 'low').catch(() => { });
+                run = [];
             };
-            if ('requestIdleCallback' in window) window.requestIdleCallback(run, { timeout: 3000 });
-            else setTimeout(run, 1500);
-        }
-
-        async function prefetchNextBatch() {
-            let fetched = 0;
-            for (let i = state.currentAliyahIndex + 1; i < state.aliyotRefs.length; i++) {
-                if (document.hidden) return;
-                const ref = state.aliyotRefs[i];
-                if (!PersistentCache.get(ref)) {
-                    try {
-                        const data = await fetchAliyahData(ref);
-                        if (data) {
-                            PersistentCache.set(ref, data);
-                            recordVerseCount(ref, data.length);
-                        }
-                    } catch (e) { }
-                    fetched++;
-                }
-                if (fetched >= PREFETCH_BATCH_SIZE) {
-                    schedulePrefetch();
-                    return;
-                }
+            for (const ref of state.aliyotRefs) {
+                if (Number.isFinite(state.verseCounts[ref]) || inFlightRequests.has(ref)) flush();
+                else run.push(ref);
             }
+            flush();
         }
 
-        async function fetchAliyahData(ref) {
-            if (inFlightRequests.has(ref)) return inFlightRequests.get(ref);
+        function fetchAliyahData(ref) {
+            if (!inFlightRequests.has(ref)) fetchAliyot([ref], 'high').catch(() => { });
+            return inFlightRequests.get(ref);
+        }
+
+        function parseAliyahRef(ref) {
+            const m = ref.match(/^(.+) (\d+):(\d+)(?:-(?:(\d+):)?(\d+))?$/);
+            if (!m) return null;
+            const [, book, p, n, endP, endN] = m;
+            return { book, p: +p, n: +n, endP: +(endP || p), endN: +(endN || n) };
+        }
+
+        // Fetches consecutive aliyot as one range and caches each aliyah separately.
+        function fetchAliyot(refs, priority) {
+            const ranges = refs.map(parseAliyahRef);
+            if (refs.length > 1 && !ranges.every(r => r && r.book === ranges[0].book)) {
+                return Promise.all(refs.map(ref => fetchAliyot([ref], priority)));
+            }
+            const first = ranges[0], last = ranges.at(-1);
+            const range = refs.length === 1 ? refs[0] : `${first.book} ${first.p}:${first.n}-${last.endP}:${last.endN}`;
             const request = (async () => {
                 const [cRes, oRes] = await Promise.all([
-                    fetch(`${API_BASE}/v3/texts/${encodeURIComponent(ref)}?return_format=strip_only_footnotes`),
-                    fetch(`${API_BASE}/v3/texts/${encodeURIComponent('Onkelos ' + ref)}?return_format=text_only`)
+                    fetch(`${API_BASE}/v3/texts/${encodeURIComponent(range)}?return_format=strip_only_footnotes`, { priority }),
+                    fetch(`${API_BASE}/v3/texts/${encodeURIComponent('Onkelos ' + range)}?return_format=text_only`, { priority })
                 ]);
-                if (!cRes.ok || !oRes.ok) return null;
+                if (!cRes.ok || !oRes.ok) return refs.map(() => null);
                 const [cJson, oJson] = await Promise.all([cRes.json(), oRes.json()]);
-                return (cJson.error || oJson.error) ? null : processData(cJson, oJson);
+                if (cJson.error || oJson.error) return refs.map(() => null);
+                const rows = processData(cJson, oJson);
+                return refs.map((ref, i) => {
+                    const r = ranges[i];
+                    const data = refs.length === 1 ? rows : rows.filter(row =>
+                        row.p * 1000 + row.n >= r.p * 1000 + r.n && row.p * 1000 + row.n <= r.endP * 1000 + r.endN);
+                    if (!data.length) return null;
+                    PersistentCache.set(ref, data);
+                    recordVerseCount(ref, data.length);
+                    return data;
+                });
             })();
-            inFlightRequests.set(ref, request);
-            try {
-                return await request;
-            } finally {
-                inFlightRequests.delete(ref);
-            }
+            refs.forEach((ref, i) => {
+                const aliyah = request.then(all => all[i]);
+                inFlightRequests.set(ref, aliyah);
+                aliyah.finally(() => {
+                    if (inFlightRequests.get(ref) === aliyah) inFlightRequests.delete(ref);
+                }).catch(() => { });
+            });
+            return request;
         }
 
         function recordVerseCount(ref, count) {
@@ -990,26 +1071,23 @@
             };
             const cT = getH(cJson);
             const oT = getH(oJson);
-            let res = [];
-            let isMulti = Array.isArray(cT[0]);
-
-            if (isMulti) {
-                let sP = parseInt(cJson.sections[0]);
-                cT.forEach((chap, cIdx) => {
-                    chap.forEach((vT, vIdx) => {
-                        let vN = (cIdx === 0) ? (parseInt(cJson.sections[1]) + vIdx) : (1 + vIdx);
-                        let p = sP + cIdx;
-                        res.push({ p, n: vN, r: `${cJson.indexTitle} ${p}:${vN}`, h: vT, o: (oT[cIdx] ? oT[cIdx][vIdx] : ""), newP: (vIdx === 0 && (cIdx > 0 || vN === 1)) });
+            const isMulti = Array.isArray(cT[0]);
+            const chapters = isMulti ? cT : [cT];
+            const targum = isMulti ? oT : [oT];
+            const sP = parseInt(cJson.sections[0]);
+            const sV = parseInt(cJson.sections[1]);
+            const res = [];
+            chapters.forEach((chap, cIdx) => {
+                chap.forEach((h = '', vIdx) => {
+                    const p = sP + cIdx;
+                    const n = (cIdx === 0 ? sV : 1) + vIdx;
+                    res.push({
+                        p, n, r: `${cJson.indexTitle} ${p}:${n}`,
+                        h: cleanSefariaHtml(h), o: cleanSefariaHtml(targum[cIdx]?.[vIdx]),
+                        newP: n === 1, pe: h.includes('{פ}'), se: h.includes('{ס}')
                     });
                 });
-            } else {
-                let sP = parseInt(cJson.sections[0]);
-                let sV = parseInt(cJson.sections[1]);
-                cT.forEach((vT, vIdx) => {
-                    let vN = sV + vIdx;
-                    res.push({ p: sP, n: vN, r: `${cJson.indexTitle} ${sP}:${vN}`, h: vT, o: (oT[vIdx] || ""), newP: (vIdx === 0 && sV === 1) });
-                });
-            }
+            });
             return res;
         }
 
@@ -1020,6 +1098,7 @@
                 state.readingPosition = state.bookmarkPosition;
             }
             let htmlChunks = [];
+            const aliyahIndex = state.currentAliyahIndex;
             for (let i = 0; i < data.length; i++) {
                 const row = data[i];
                 if (row.newP) {
@@ -1027,19 +1106,16 @@
                 }
                 const id = `${state.parshaTitle}-${row.p}-${row.n}`;
                 const bCls = state.bookmarkId === id ? 'bookmark-active' : '';
-                const displayH = cleanSefariaHtml(row.h);
-                const displayO = cleanSefariaHtml(row.o);
-                const bookTitle = state.aliyotRefs[state.currentAliyahIndex].replace(/\s+\d.*$/, '');
-                const encodedVerseRef = encodeURIComponent(row.r || `${bookTitle} ${row.p}:${row.n}`);
+                const encodedVerseRef = encodeURIComponent(row.r);
                 const verseLabel = `פרק ${getHNum(row.p)}, פסוק ${getHNum(row.n)}`;
                 htmlChunks.push(`<span class="verse-sequence">` +
-                    `<span class="possuk-number ${bCls}" data-id="${id}" data-aliyah-index="${state.currentAliyahIndex}" data-verse-index="${i}" data-verse-ref="${encodedVerseRef}" data-verse-label="${verseLabel}">${getHNum(row.n)}</span>` +
+                    `<span class="possuk-number ${bCls}" data-id="${id}" data-aliyah-index="${aliyahIndex}" data-verse-index="${i}" data-verse-ref="${encodedVerseRef}" data-verse-label="${verseLabel}">${getHNum(row.n)}</span>` +
                     `<button type="button" class="gemara-trigger gemara-unavailable" data-verse-ref="${encodedVerseRef}" data-verse-label="${verseLabel}" aria-label="מקורות בתלמוד הבבלי, ${verseLabel}" aria-expanded="false">גמ׳</button>` +
-                    `<span class="hebrew-text">${displayH}</span>` +
-                    `<span class="hebrew-text">${displayH}</span>` +
-                    `<span class="targum-text">${displayO}</span>` +
-                    (row.h.includes("{פ}") ? `<span class="parsha-break petuhah-marker">פ</span>` : "") +
-                    (row.h.includes("{ס}") ? `<span class="parsha-break setumah-marker">ס</span>` : "") +
+                    `<span class="hebrew-text">${row.h}</span>` +
+                    `<span class="hebrew-text">${row.h}</span>` +
+                    `<span class="targum-text">${row.o}</span>` +
+                    (row.pe ? `<span class="parsha-break petuhah-marker">פ</span>` : "") +
+                    (row.se ? `<span class="parsha-break setumah-marker">ס</span>` : "") +
                     ` ` +
                     `</span>`);
             }
@@ -1210,8 +1286,7 @@
             const grouped = GemaraCache.get(state.aliyotRefs[state.currentAliyahIndex]);
             if (!grouped) return;
             renderGemaraPanelContent(verseRef, verseNumber.dataset.verseLabel || '', grouped[verseRef] || []);
-            setActiveGemaraTrigger(Array.from(document.querySelectorAll('.gemara-trigger'))
-                .find(trigger => trigger.dataset.verseRef === verseNumber.dataset.verseRef) || null);
+            setActiveGemaraTrigger(verseNumber.parentElement.querySelector('.gemara-trigger'));
         }
 
         function setActiveGemaraTrigger(trigger) {
@@ -1322,12 +1397,14 @@
             const buttons = document.querySelectorAll('.possuk-number');
             if (!buttons.length) return null;
             const readingLine = window.innerHeight * 0.3;
-            let current = buttons[0];
-            for (const button of buttons) {
-                if (button.getBoundingClientRect().top > readingLine) break;
-                current = button;
+            // Verse tops increase in document order, so find the last one above the line.
+            let lo = 0, hi = buttons.length - 1;
+            while (lo < hi) {
+                const mid = (lo + hi + 1) >> 1;
+                if (buttons[mid].getBoundingClientRect().top > readingLine) hi = mid - 1;
+                else lo = mid;
             }
-            return current;
+            return buttons[lo];
         }
 
         function getHNum(n) { return (n > 0 && n <= HEB_NUMBERS.length) ? HEB_NUMBERS[n - 1] : n; }

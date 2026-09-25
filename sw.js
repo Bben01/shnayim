@@ -1,4 +1,4 @@
-const CACHE_NAME_STATIC = 'shnayim-static-v13';
+const CACHE_NAME_STATIC = 'shnayim-static-v14';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
@@ -10,9 +10,28 @@ self.addEventListener('install', (event) => {
     self.skipWaiting();
     event.waitUntil(
         caches.open(CACHE_NAME_STATIC).then((cache) => {
-            return cache.addAll(ASSETS_TO_CACHE);
+            return cache.addAll(ASSETS_TO_CACHE.map((url) => new Request(url, { cache: 'reload' })));
         })
     );
+});
+
+// Re-downloads the app shell, bypassing the HTTP cache; resolves true if the page was refreshed.
+async function refreshAssets() {
+    const cache = await caches.open(CACHE_NAME_STATIC);
+    const results = await Promise.all(ASSETS_TO_CACHE.map(async (url) => {
+        const response = await fetch(url, { cache: 'reload' });
+        if (!response.ok) return false;
+        await cache.put(url, response);
+        return url === './index.html';
+    }));
+    return results.some(Boolean);
+}
+
+self.addEventListener('message', (event) => {
+    if (event.data?.type !== 'refresh-assets') return;
+    event.waitUntil(refreshAssets()
+        .catch(() => false)
+        .then((refreshed) => event.ports[0]?.postMessage({ refreshed })));
 });
 
 self.addEventListener('activate', (event) => {
@@ -38,11 +57,12 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
         caches.match(event.request).then((cachedResponse) => {
             const fetchPromise = fetch(event.request).then((networkResponse) => {
-                caches.open(CACHE_NAME_STATIC).then((cache) => {
-                    cache.put(event.request, networkResponse.clone());
-                });
+                if (networkResponse.ok) {
+                    const copy = networkResponse.clone();
+                    caches.open(CACHE_NAME_STATIC).then((cache) => cache.put(event.request, copy));
+                }
                 return networkResponse;
-            });
+            }).catch((err) => cachedResponse || Promise.reject(err));
             return cachedResponse || fetchPromise;
         })
     );
