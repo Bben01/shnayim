@@ -149,7 +149,8 @@
             display: none;
         }
 
-        #gemara-toggle {
+        #gemara-toggle,
+        #update-app-button {
             width: 100%;
             justify-content: space-between;
             gap: 16px;
@@ -160,6 +161,11 @@
             font-size: 13px;
             font-weight: normal;
             white-space: nowrap;
+        }
+
+        #update-app-button {
+            border-top: 1px solid #eee;
+            border-radius: 0;
         }
 
         .settings-row {
@@ -534,6 +540,7 @@
                         <button id="gemara-toggle" type="button" aria-pressed="false" onclick="toggleGemara(event)">
                             <span>מקורות בבבלי</span><span id="gemara-check" hidden>✓</span>
                         </button>
+                        <button id="update-app-button" type="button" onclick="updateApp(event)">עדכן גרסה</button>
                     </div>
                 </div>
             </div>
@@ -588,9 +595,6 @@
         const GEMARA_CACHE_VERSION = 3;
         const GEMARA_ENABLED_KEY = 'shnayim_gemara_enabled_v1';
         const WEEKLY_BOUNDARY_VERSION = 5;
-        const LAST_RELOAD_KEY = 'shnayim_last_reload';
-        const UPDATE_RELOAD_KEY = 'shnayim_update_reload';
-        const DOUBLE_RELOAD_WINDOW = 15000;
         // Sefaria never lists Vezot Haberacha as a weekly reading, so it is supplied locally.
         const VEZOT_HABERACHA = {
             title: { en: 'Parashat Hashavua', he: 'פרשת השבוע' },
@@ -747,33 +751,35 @@
             }
         }
 
-        // The service worker serves a cached app, so two quick reloads fetch the latest version.
-        async function checkForUpdateOnDoubleReload() {
-            if (sessionStorage.getItem(UPDATE_RELOAD_KEY)) {
-                sessionStorage.removeItem(UPDATE_RELOAD_KEY);
-                return;
-            }
-            const controller = navigator.serviceWorker.controller;
-            if (!controller || performance.getEntriesByType('navigation')[0]?.type !== 'reload') {
-                sessionStorage.removeItem(LAST_RELOAD_KEY);
-                return;
-            }
-            const lastReload = Number(sessionStorage.getItem(LAST_RELOAD_KEY));
-            if (!lastReload || Date.now() - lastReload > DOUBLE_RELOAD_WINDOW) {
-                sessionStorage.setItem(LAST_RELOAD_KEY, String(Date.now()));
-                return;
-            }
-            sessionStorage.removeItem(LAST_RELOAD_KEY);
-            const reloadOnce = () => {
-                sessionStorage.setItem(UPDATE_RELOAD_KEY, '1');
+        // The service worker serves a cached app, so fetch the latest version explicitly.
+        window.updateApp = async (e) => {
+            e?.stopPropagation();
+            const controller = navigator.serviceWorker?.controller;
+            if (!controller) {
                 location.reload();
+                return;
+            }
+            const button = document.getElementById('update-app-button');
+            const label = button.textContent;
+            const fail = () => {
+                button.textContent = 'העדכון נכשל';
+                setTimeout(() => {
+                    button.textContent = label;
+                    button.disabled = false;
+                }, 2000);
             };
+            button.disabled = true;
+            button.textContent = 'מעדכן...';
             try {
                 const registration = await navigator.serviceWorker.getRegistration();
                 await registration?.update();
-                if (registration?.installing || registration?.waiting) {
+                const incoming = registration?.installing || registration?.waiting;
+                if (incoming) {
                     // The new worker skips waiting and claims this page once its assets are cached.
-                    navigator.serviceWorker.addEventListener('controllerchange', reloadOnce, { once: true });
+                    navigator.serviceWorker.addEventListener('controllerchange', () => location.reload(), { once: true });
+                    incoming.addEventListener('statechange', () => {
+                        if (incoming.state === 'redundant') fail();
+                    });
                     return;
                 }
                 const refreshed = await new Promise(resolve => {
@@ -781,14 +787,17 @@
                     channel.port1.onmessage = e => resolve(e.data?.refreshed);
                     controller.postMessage({ type: 'refresh-assets' }, [channel.port2]);
                 });
-                if (refreshed) reloadOnce();
-            } catch (e) { console.error(e); }
-        }
+                if (refreshed) {
+                    location.reload();
+                    return;
+                }
+            } catch (err) { console.error(err); }
+            fail();
+        };
 
         document.addEventListener('DOMContentLoaded', async () => {
             if ('serviceWorker' in navigator && window.location.protocol.indexOf('http') === 0) {
                 navigator.serviceWorker.register('./sw.js').catch(console.error);
-                checkForUpdateOnDoubleReload();
             }
 
             applyGemaraPreference();
